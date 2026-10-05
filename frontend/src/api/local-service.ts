@@ -13,6 +13,25 @@ export function moduleMeta(key: string): ModuleMeta {
   return meta
 }
 
+/** 模块里算「待处理」的状态集合：调度方案只认待审核，其它模块沿用除终态外的旧口径。 */
+export function pendingStatusesOf(meta: ModuleMeta): string[] {
+  return meta.pendingStatuses ?? meta.statuses.slice(0, -1)
+}
+
+/** 按状态统计记录数：清单、详情、概览三处共用同一口径，待审核数不会对不上。 */
+export function countByStatus(key: string): Record<string, number> {
+  const meta = moduleMeta(key)
+  const counter: Record<string, number> = {}
+  for (const status of meta.statuses) {
+    counter[status] = 0
+  }
+  for (const row of listRows(key)) {
+    const status = String(row.status)
+    counter[status] = (counter[status] ?? 0) + 1
+  }
+  return counter
+}
+
 export function filterRows(rows: EntryRow[], filters: Record<string, string>): EntryRow[] {
   const pairs = Object.entries(filters).filter(([, value]) => value.trim() !== '')
   if (pairs.length === 0) {
@@ -26,6 +45,63 @@ export function filterRows(rows: EntryRow[], filters: Record<string, string>): E
 export function listEntries(key: string, filters: Record<string, string> = {}): PageResult {
   const matched = filterRows(listRows(key), filters)
   return { items: matched, total: matched.length, page: 1, size: matched.length }
+}
+
+export function getEntry(key: string, id: number): EntryRow | undefined {
+  return listRows(key).find((row) => Number(row.id) === id)
+}
+
+function nextId(rows: EntryRow[]): number {
+  return rows.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1
+}
+
+/**
+ * 登记一条新记录。调度方案按「方案编号」去重：编号已存在就拒绝写入，
+ * 配合历史数据迁移时的合并，保证同一方案编号在库里只有一条。
+ */
+export function createEntry(
+  key: string,
+  fields: Record<string, string>,
+): ActionResult & { id?: number } {
+  const meta = moduleMeta(key)
+  const data: Record<string, string> = {}
+  for (const field of meta.fields) {
+    const value = String(fields[field] ?? '').trim()
+    if (value) {
+      data[field] = value
+    }
+  }
+
+  const rows = listRows(key)
+  const codeField = meta.fields[0]
+  if (!data[codeField]) {
+    return { ok: false, message: `${codeField}不能为空` }
+  }
+  const duplicated = rows.some(
+    (row) => String(row[codeField] ?? '').trim() === data[codeField],
+  )
+  if (duplicated) {
+    return { ok: false, message: `${codeField}「${data[codeField]}」已存在，重复提交只保留一条` }
+  }
+
+  const status = meta.statuses[0]
+  const id = nextId(rows)
+  const created: EntryRow = {
+    id,
+    status,
+    pending: pendingStatusesOf(meta).includes(status),
+    abnormal: false,
+    ...data,
+  }
+  if (meta.statusField) {
+    created[meta.statusField] = status
+  }
+  // 方案编号缺失兜底（前面已校验，这里只防其它模块字段顺序异常）。
+  if (meta.key === 'dispatchplan' && !created['方案名称']) {
+    created['方案名称'] = `调度方案-${id}`
+  }
+  saveRows(key, [...rows, created])
+  return { ok: true, message: `${meta.entity}已登记，当前状态「${status}」`, id }
 }
 
 export function runAction(key: string, id: number, action: string): ActionResult {
@@ -43,12 +119,26 @@ export function runAction(key: string, id: number, action: string): ActionResult
   if (current === target) {
     return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
   }
-  const lastStatus = meta.statuses[meta.statuses.length - 1]
+  // 调度方案：待编制 → 待审核 → 已批准依次流转，不允许跳级；废止仅已批准可执行。
+  if (meta.transitions) {
+    const allowed = meta.transitions[current]
+    if (!allowed || !allowed.includes(target)) {
+      return {
+        ok: false,
+        message: `${meta.entity}当前为「${current}」，不能直接流转到「${target}」，请按状态顺序操作`,
+      }
+    }
+  }
+  const pendingSet = pendingStatusesOf(meta)
   const updated: EntryRow = {
     ...rows[index],
     status: target,
-    pending: target !== lastStatus,
+    pending: pendingSet.includes(target),
     abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
+  }
+  // 业务字段里的状态列与流转状态同步，列表与详情看到的方案状态保持一致。
+  if (meta.statusField) {
+    updated[meta.statusField] = target
   }
   const next = [...rows]
   next[index] = updated
@@ -88,10 +178,11 @@ export function loadOverview(): OverviewResult {
   const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
     const entries = rows[meta.key] ?? []
+    const pendingSet = pendingStatusesOf(meta)
     return {
       name: meta.name,
       created: entries.length,
-      pending: entries.filter((row) => row.pending).length,
+      pending: entries.filter((row) => pendingSet.includes(String(row.status))).length,
       abnormal: entries.filter((row) => row.abnormal).length,
     }
   })
