@@ -18,6 +18,10 @@ export type ModuleMeta = {
   actions: string[]
   actionTargets: Record<string, string>
   metrics: string[]
+  /** 概览/清单统一口径：处于该状态才算「待处理（待审核）」；不配置则沿用行上的 pending 标记 */
+  pendingStatus?: string
+  /** 状态机约束：每个动作只允许从这些状态发起，不配置表示不限制（兼容历史模块） */
+  actionAllowed?: Record<string, string[]>
 }
 
 export type PageResult = {

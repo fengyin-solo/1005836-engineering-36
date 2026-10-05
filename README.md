@@ -69,3 +69,21 @@ npm run build
   `frontend/src/data/seed.ts`。
 - 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
 - 想回到初始数据：清掉浏览器里 `drainage-pump:entries` 这一项，或调用 `resetModule(模块)`。
+
+## 存储结构版本化与迁移
+
+浏览器里的数据以「信封」结构保存（`frontend/src/data/migrations.ts`）：
+
+```jsonc
+{ "schemaVersion": 2, "modules": { "dispatchplan": [ /* 行 */ ] }, "migrationLog": [ /* 迁移留痕 */ ] }
+```
+
+- 最早一版是没有版本号的纯模块表，读取时按 v1 → 当前版本逐级迁移：后加的「适用雨型、
+  审核人」等字段按默认值补齐，取不到的坏记录兜底修复，方案编号重复的历史记录合并为一条。
+- 迁移是**幂等**的：升级后的信封带上 `schemaVersion`，行上有 `__migratedFrom` 等标记，
+  重复打开不会重复迁移、不重复记日志。
+- 排水调度方案的状态机为「待编制 → 待审核 → 已批准」，另有「已废止」终态；
+  每个动作的前置状态登记在 `modules.ts` 的 `actionAllowed`，跳级操作会被拒绝。
+- 待审核数以「状态 = 待审核」为唯一口径（`pendingStatus`），清单统计卡、详情页、
+  运营概览三处读数一致。
+- 方案编号是业务主键：重复提交只更新原方案、只保留一条（见 `submitPlan`）。
